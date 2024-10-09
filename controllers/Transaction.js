@@ -1,152 +1,188 @@
 const Transaction = require("../model/transactions");
 
-const listTransactions = async (req, res) => {
+// Function to list transactions with optional search, month filter, and pagination
+const listTransactions = async (req) => {
   const { month, page = 1, perPage = 10, search = "" } = req.query;
-
-  const pipeline = [];
-  if (search) {
-    pipeline.push({
-      $search: {
-        index: "searching",
-        compound: {
-          should: [
-            {
-              text: {
-                query: search,
-                path: ["title", "description"],
-              },
-            },
-            {
-              equals: {
-                path: "price",
-                value: parseFloat(search),
-              },
-            },
-          ],
-        },
-      },
-    });
-  }
-
-  // Add the $match stage for filtering by month
-  pipeline.push({
-    $match: {
-      $expr: {
-        $eq: [{ $month: "$dateOfSale" }, parseInt(month)], // Compare the extracted month with the passed month
-      },
-    },
-  });
-
-  // Add pagination stages
-  pipeline.push(
-    {
-      $skip: (parseInt(page) - 1) * parseInt(perPage),
-    },
-    {
-      $limit: parseInt(perPage),
-    }
-  );
-
-  let transactions;
-  if (search || month) {
-    // When search is provided, use the aggregation pipeline
-    transactions = await Transaction.aggregate(pipeline);
-  } else {
-    // When no search is provided, use regular find with pagination
-    transactions = await Transaction.find()
-      .skip((parseInt(page) - 1) * parseInt(perPage))
-      .limit(parseInt(perPage));
-  }
-
-  console.log(transactions);
-  const totalCount = 10;
-
-  res.status(200).json({
-    totalCount,
-    page,
-    perPage,
-    transactions,
-  });
-};
-
-const getStatistics = async (req, res) => {
+  console.log(req.query);
   try {
-    const { month } = req.query; // Assume month is passed as a number (e.g., "11" for November)
+    const pipeline = [];
 
-    if (!month) {
-      return res.status(400).json({ message: "Month is required" });
-    }
-
-    const pipeline = [
-      {
-        // Filter by month
-        $match: {
-          $expr: {
-            $eq: [{ $month: "$dateOfSale" }, parseInt(month)], // Extract month from `dateOfSale`
-          },
-        },
-      },
-      {
-        // Group stage to calculate totals
-        $group: {
-          _id: null, // We don't need to group by any specific field
-          totalSaleAmount: {
-            $sum: {
-              $cond: [{ $eq: ["$sold", true] }, "$price", 0], // Sum only the sold items' prices
+    // Add $search stage if a search query is provided
+    if (search) {
+      const parsedSearch = parseFloat(search); // Parse search input once
+      const isNumeric = !isNaN(parsedSearch) && isFinite(parsedSearch); // Check if the search input is a number
+      if (isNumeric) {
+        pipeline.push({
+          $search: {
+            index: "searching",
+            compound: {
+              should: [
+                {
+                  text: {
+                    query: search,
+                    path: ["title", "description"],
+                  },
+                },
+                {
+                  equals: {
+                    path: "price",
+                    value: parseFloat(search),
+                  },
+                },
+              ],
             },
           },
-          totalSoldItems: {
-            $sum: { $cond: [{ $eq: ["$sold", true] }, 1, 0] }, // Count only sold items
+        });
+      } else {
+        const regexSearch = new RegExp(search, "i"); // Create a case-insensitive regex
+        pipeline.push({
+          $match: {
+            $or: [
+              {
+                title: { $regex: regexSearch }, // Search in title
+              },
+              {
+                description: { $regex: regexSearch }, // Search in description
+              },
+            ],
           },
-          totalNotSoldItems: {
-            $sum: { $cond: [{ $eq: ["$sold", false] }, 1, 0] }, // Count only unsold items
-          },
-        },
-      },
-    ];
-
-    // Execute the aggregation pipeline
-    const result = await Transaction.aggregate(pipeline);
-    console.log(result);
-    if (result.length === 0) {
-      return res
-        .status(404)
-        .json({ message: "No data found for the selected month" });
+        });
+      }
     }
 
-    const statistics = result[0];
-
-    // Return the result
-    return res.json({
-      totalSaleAmount: statistics.totalSaleAmount,
-      totalSoldItems: statistics.totalSoldItems,
-      totalNotSoldItems: statistics.totalNotSoldItems,
-    });
-  } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: "Server error" });
-  }
-};
-
-const getBarChartData = async (req, res) => {
-  try {
-    const { month } = req.query; // Assume month is passed as a number (e.g., "11" for November)
-
-    if (!month) {
-      return res.status(400).json({ message: "Month is required" });
-    }
-
-    const pipeline = [
-      {
-        // First stage to filter by month
+    // Add the $match stage for filtering by month if a month is provided
+    if (month) {
+      pipeline.push({
         $match: {
           $expr: {
             $eq: [{ $month: "$dateOfSale" }, parseInt(month)], // Compare the extracted month with the passed month
           },
         },
+      });
+    }
+
+    // Add pagination stages
+    pipeline.push(
+      {
+        $skip: (parseInt(page) - 1) * parseInt(perPage),
       },
       {
-        // Add a price range field
+        $limit: parseInt(perPage),
+      }
+    );
+
+    let transactions;
+    if (search || month) {
+      // Use the aggregation pipeline when search or month filtering is applied
+      transactions = await Transaction.aggregate(pipeline);
+      // transactions =await Transaction.find
+    } else {
+      // Use regular find with pagination when no filters are applied
+      transactions = await Transaction.find()
+        .skip((parseInt(page) - 1) * parseInt(perPage))
+        .limit(parseInt(perPage));
+    }
+
+    // Get the total count for the query (without pagination)
+    const totalCount = await Transaction.countDocuments();
+
+    // Return the final result
+    return {
+      totalCount,
+      page,
+      perPage,
+      transactions,
+    };
+  } catch (error) {
+    console.error("Error in listTransactions: ", error);
+    return { error: "An error occurred while fetching transactions" };
+  }
+};
+
+// Example usage of the function
+
+const getStatistics = async (req) => {
+  const { month } = req.query;
+  try {
+    if (!month) {
+      return { error: "Month is required" };
+    }
+
+    const pipeline = [
+      {
+        $match: {
+          $expr: {
+            $eq: [{ $month: "$dateOfSale" }, parseInt(month)],
+          },
+        },
+      },
+      {
+        $group: {
+          _id: null,
+          totalSaleAmount: {
+            $sum: {
+              $cond: [{ $eq: ["$sold", true] }, "$price", 0],
+            },
+          },
+          totalSoldItems: {
+            $sum: { $cond: [{ $eq: ["$sold", true] }, 1, 0] },
+          },
+          totalNotSoldItems: {
+            $sum: { $cond: [{ $eq: ["$sold", false] }, 1, 0] },
+          },
+        },
+      },
+    ];
+
+    const result = await Transaction.aggregate(pipeline);
+
+    if (result.length === 0) {
+      return { error: "No data found for the selected month" };
+    }
+
+    const statistics = result[0];
+    return {
+      totalSaleAmount: statistics.totalSaleAmount,
+      totalSoldItems: statistics.totalSoldItems,
+      totalNotSoldItems: statistics.totalNotSoldItems,
+    };
+  } catch (error) {
+    console.error("Error in getStatistics:", error);
+    return { error: "Server error" };
+  }
+};
+
+const getBarChartData = async (req) => {
+  const { month } = req.query;
+  try {
+    if (!month) {
+      return { error: "Month is required" };
+    }
+
+    // Define the price ranges
+    const priceRanges = [
+      "0-100",
+      "101-200",
+      "201-300",
+      "301-400",
+      "401-500",
+      "501-600",
+      "601-700",
+      "701-800",
+      "801-900",
+      "901-above",
+    ];
+
+    // Define the aggregation pipeline
+    const pipeline = [
+      {
+        $match: {
+          $expr: {
+            $eq: [{ $month: "$dateOfSale" }, parseInt(month)],
+          },
+        },
+      },
+      {
         $addFields: {
           priceRange: {
             $switch: {
@@ -201,20 +237,18 @@ const getBarChartData = async (req, res) => {
                   then: "801-900",
                 },
               ],
-              default: "901-above", // Any price above 900
+              default: "901-above",
             },
           },
         },
       },
       {
-        // Group by price range and count items
         $group: {
           _id: "$priceRange",
-          count: { $sum: 1 }, // Count the number of items in each price range
+          count: { $sum: 1 },
         },
       },
       {
-        // Sort the results by price range order
         $sort: { _id: 1 },
       },
     ];
@@ -222,64 +256,68 @@ const getBarChartData = async (req, res) => {
     // Execute the aggregation pipeline
     const result = await Transaction.aggregate(pipeline);
 
-    // Prepare the response for bar chart
-    const counts= result.map((item) => ({ range: item._id, count: item.count }))
-  
+    // Convert the result to a map for easier access
+    const resultMap = result.reduce((acc, item) => {
+      acc[item._id] = item.count;
+      return acc;
+    }, {});
 
-    // Return the result
-    return res.json(counts);
+    // Create an array to hold the final counts for all price ranges
+    const counts = priceRanges.map((range) => ({
+      range: range,
+      count: resultMap[range] || 0, // Default to 0 if no transactions
+    }));
+
+    return counts;
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: "Server error" });
+    console.error("Error in getBarChartData:", error);
+    return { error: "Server error" };
   }
 };
 
-const getPieChartData = async (req, res) => {
+const getPieChartData = async (req) => {
+  const { month } = req.query;
   try {
-    const { month } = req.query;
-
     if (!month) {
-      return res.status(400).json({ message: 'Month is required' });
+      return { error: "Month is required" };
     }
 
     const pipeline = [
       {
-        // First stage to filter by month
         $match: {
           $expr: {
-            $eq: [{ $month: "$dateOfSale" }, parseInt(month)], // Compare the extracted month with the passed month
+            $eq: [{ $month: "$dateOfSale" }, parseInt(month)],
           },
         },
       },
       {
-        // Group by category and count the number of items in each category
         $group: {
-          _id: "$category", // Group by category
-          count: { $sum: 1 }, // Count the number of items in each category
+          _id: "$category",
+          count: { $sum: 1 },
         },
       },
       {
-        // Sort categories by count (optional)
         $sort: { count: -1 },
       },
     ];
 
-    // Execute the aggregation pipeline
     const result = await Transaction.aggregate(pipeline);
 
-    // Prepare the response for the pie chart
-    const pieChartData = {
-      categories: result.map(item => ({
-        category: item._id,
-        count: item.count,
-      })),
-    };
+    const pieChartData = result.map((item) => ({
+      category: item._id,
+      count: item.count,
+    }));
 
-    // Return the result
-    return res.json(pieChartData);
+    return pieChartData;
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: 'Server error' });
+    console.error("Error in getPieChartData:", error);
+    return { error: "Server error" };
   }
-}
-module.exports = { listTransactions, getStatistics,getBarChartData,getPieChartData };
+};
+
+module.exports = {
+  listTransactions,
+  getStatistics,
+  getBarChartData,
+  getPieChartData,
+};
